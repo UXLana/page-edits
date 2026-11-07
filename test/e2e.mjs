@@ -292,6 +292,118 @@ try {
   assert.equal(await page.getByRole("listitem").filter({ hasText: "bulk" }).count(), 45);
   pass(`the list counts all ${total} notes and shows every unfinished one`);
 
+  const beforeClear = readNotes(inbox).length;
+  await write(page, "p4", "changed my mind");
+  const toClear = (await waitFor(beforeClear + 1)).at(-1);
+  const clearButton = page.getByRole("button", { name: new RegExp(`^Clear queued note ${toClear.id}:`) });
+  await clearButton.waitFor({ timeout: 15000 });
+  await clearButton.focus();
+  await page.waitForTimeout(2800); // Cross two polls without pressing a key.
+  assert.ok(await clearButton.evaluate(el => el.getRootNode().activeElement === el));
+  pass("queue polling preserves the focused Clear button");
+  await page.route(`**/__page-edits/notes/${toClear.id}/clear`, route => route.fulfill({ status: 503, contentType: "application/json", body: JSON.stringify({ error: "Try clearing again." }) }));
+  await page.keyboard.press("Enter");
+  await page.getByRole("list").getByText("Try clearing again.").waitFor();
+  assert.ok(await clearButton.evaluate(el => el.getRootNode().activeElement === el));
+  await page.waitForTimeout(1400);
+  assert.ok(await clearButton.evaluate(el => el.getRootNode().activeElement === el));
+  await page.unroute(`**/__page-edits/notes/${toClear.id}/clear`);
+  pass("a failed Clear restores its keyboard control and keeps focus through the next poll");
+  await page.keyboard.press("Enter");
+  await clearButton.waitFor({ state: "hidden", timeout: 15000 });
+  assert.equal(readNotes(inbox).find(n => n.id === toClear.id).state, "cancelled");
+  assert.throws(() => appendState(inbox, toClear.id, "applying"), /cleared/);
+  await page.reload();
+  await page.getByRole("button", { name: /^Notes ·/ }).waitFor();
+  assert.equal(await page.getByRole("listitem").filter({ hasText: "changed my mind" }).count(), 0);
+  pass("Clear is keyboard-accessible, removes a queued note permanently, and blocks a stale receiver claim");
+
+  await write(page, "p4", "already starting");
+  const startedNote = (await waitFor(beforeClear + 2)).at(-1);
+  const tooLate = page.getByRole("button", { name: new RegExp(`^Clear queued note ${startedNote.id}:`) });
+  await tooLate.waitFor({ timeout: 15000 });
+  appendState(inbox, startedNote.id, "applying");
+  await tooLate.click();
+  await page.getByRole("list").getByText(/has already started or finished; it cannot be cleared/).waitFor({ timeout: 15000 });
+  assert.equal(readNotes(inbox).find(n => n.id === startedNote.id).state, "applying");
+  pass("a stale Clear button reports an edit that already started, without pretending it was cancelled");
+
+  const singleInbox = join(mkdtempSync(join(tmpdir(), "page-edits-single-clear-")), "one.jsonl");
+  const singleHandler = createHandler({ root: tmpdir(), storeFile: singleInbox });
+  const singleServer = createServer((req, res) => {
+    if (req.url === "/") { res.setHeader("Content-Type", "text/html"); return res.end(PAGE); }
+    return singleHandler(req, res, () => { res.statusCode = 404; res.end(); });
+  });
+  const singleContext = await browser.newContext();
+  try {
+    await new Promise(r => singleServer.listen(0, "127.0.0.1", r));
+    const one = await singleContext.newPage();
+    await one.goto(`http://127.0.0.1:${singleServer.address().port}/`);
+    await write(one, "p1", "clear my only note");
+    const onlyClear = one.getByRole("button", { name: /^Clear queued note 1:/ });
+    await onlyClear.waitFor({ timeout: 15000 });
+    await onlyClear.focus();
+    await one.keyboard.press("Enter");
+    const emptyQueue = one.getByRole("button", { name: "Notes · all handled · 0 total" });
+    await emptyQueue.waitFor({ timeout: 15000 });
+    assert.ok(await emptyQueue.evaluate(el => el.getRootNode().activeElement === el));
+    assert.equal(readNotes(singleInbox)[0].state, "cancelled");
+    pass("clearing the last item leaves keyboard focus on the visible empty-queue toggle");
+
+    const longRoute = "/" + "a-long-unbroken-page-address".repeat(12);
+    appendNote(singleInbox, { root: tmpdir(), page: longRoute, selected: "Cross-page copy", comment: "Make this clearer." });
+    await one.setViewportSize({ width: 320, height: 800 });
+    const crossPageClear = one.getByRole("button", { name: /^Clear queued note 2:/ });
+    await crossPageClear.waitFor({ timeout: 15000 });
+    assert.equal(await crossPageClear.evaluate(el => getComputedStyle(el).opacity), "0");
+    await crossPageClear.locator("..").hover();
+    assert.equal(await crossPageClear.evaluate(el => getComputedStyle(el).opacity), "1");
+    await one.mouse.move(0, 0);
+    assert.equal(await crossPageClear.evaluate(el => getComputedStyle(el).opacity), "0");
+    const layout = await crossPageClear.evaluate(button => {
+      const item = button.closest("li");
+      const label = item.querySelector(".page");
+      const labelRect = label.getBoundingClientRect();
+      const buttonRect = button.getBoundingClientRect();
+      return {
+        labelRight: labelRect.right, clearLeft: buttonRect.left,
+        labelWidth: label.clientWidth, labelScrollWidth: label.scrollWidth,
+        itemWidth: item.clientWidth, itemScrollWidth: item.scrollWidth,
+        targetWidth: buttonRect.width, targetHeight: buttonRect.height,
+      };
+    });
+    assert.ok(layout.labelRight < layout.clearLeft, "page address must stay left of the Clear control");
+    assert.ok(layout.labelScrollWidth <= layout.labelWidth, "long page address must wrap within its label");
+    assert.ok(layout.itemScrollWidth <= layout.itemWidth, "queue item must not overflow horizontally");
+    assert.ok(layout.targetWidth >= 28 && layout.targetHeight >= 28);
+    await crossPageClear.focus();
+    assert.equal(await crossPageClear.evaluate(el => getComputedStyle(el).opacity), "1");
+    await one.keyboard.press("Enter");
+    await crossPageClear.waitFor({ state: "hidden", timeout: 15000 });
+    assert.equal(readNotes(singleInbox).find(note => note.id === 2).state, "cancelled");
+    pass("a long cross-page address wraps beside the top-right Clear control at 320px and remains clearable");
+    appendNote(singleInbox, { root: tmpdir(), page: "/", selected: "Touch-screen copy", comment: "Keep the control visible." });
+    const touchContext = await browser.newContext({ viewport: { width: 320, height: 800 }, hasTouch: true });
+    try {
+      const touchPage = await touchContext.newPage();
+      await touchPage.goto(`http://127.0.0.1:${singleServer.address().port}/`);
+      const touchClear = touchPage.getByRole("button", { name: /^Clear queued note 3:/ });
+      await touchClear.waitFor({ timeout: 15000 });
+      assert.equal(await touchPage.evaluate(() => matchMedia("(hover: none)").matches), true);
+      assert.equal(await touchClear.evaluate(el => getComputedStyle(el).opacity), "1");
+      await touchClear.tap();
+      await touchClear.waitFor({ state: "hidden", timeout: 15000 });
+      assert.equal(readNotes(singleInbox).find(note => note.id === 3).state, "cancelled");
+      pass("the subtle Clear control appears on hover or keyboard focus and stays visible on touch screens");
+    } finally {
+      await touchContext.close();
+    }
+  } finally {
+    await singleContext.close();
+    singleServer.closeAllConnections();
+    await new Promise(r => singleServer.close(r));
+  }
+
   const shot = process.argv[2];
   if (shot) {
     await select("p2");

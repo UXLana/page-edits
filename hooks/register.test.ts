@@ -1,4 +1,5 @@
 import { expect, mock, test } from 'claude-code/testing'
+import { NOTE_FORMAT } from '../fold.mjs'
 
 // A command as the person types it at the prompt.
 const typed = (args = '') =>
@@ -39,6 +40,8 @@ test('/page-edits hands each open note to the session once, in order, until stop
   expect(prompts[0]).toMatch(/^page-edits: 1 new note from the page\. Apply it in order with the apply-page-edits skill/)
   expect(prompts[0]).toMatch(/- note 2 · \/about · "Second words" → shorter/)
   expect(prompts[0]).toMatch(/^Receiver: `npx --no page-edits <command> --inbox \.page-edits\/notes\.jsonl`$/m)
+  expect(prompts[0]).toMatch(/"id":2,"uid":"uid-b"/)
+  expect(prompts[0]).toMatch(/--identity on every find and state command/)
   expect(prompts[0]).not.toMatch(/note 1 /)
   expect(statuses.at(-1)).toBe('page-edits: watching .page-edits/notes.jsonl · 1 waiting')
 
@@ -147,7 +150,7 @@ test('a cleared inbox, a refused hand-over and a page address with a line break'
 
 test('the receiver setting names the command, and a newer note format waits', { options: { receiver: 'node /opt/page-edits/cli.mjs' } }, async ($, on) => {
   const clock = mock.clock(on)
-  const newer = JSON.stringify({ type: 'note', format: 2, uid: 'uid-n', at, clientId: 'n', root: '/site', page: '/', selected: 'Later', before: '', after: '', comment: 'c' })
+  const newer = JSON.stringify({ type: 'note', format: NOTE_FORMAT + 1, uid: 'uid-n', at, clientId: 'n', root: '/site', page: '/', selected: 'Later', before: '', after: '', comment: 'c' })
   const inbox = `${note('a', 'Now', 'warmer')}\n${newer}\n`
   const prompts: string[] = []
   const statuses: (string | undefined)[] = []
@@ -175,3 +178,29 @@ test('the receiver setting names the command, and a newer note format waits', { 
   expect(statuses).toContain('page-edits: 1 note(s) need a newer page-edits plugin; update it')
 })
 
+
+test('cleared notes are never handed over, including after restarting the watch', async ($, on) => {
+  const clock = mock.clock(on)
+  let inbox = `${note('a', 'Cleared', 'never apply')}\n${state(1, 'cancelled')}\n${note('b', 'Waiting', 'shorter')}\n`
+  let mtimeMs = 1
+  const prompts: string[] = []
+  on('command.register', () => ({ value: { command: 'page-edits' } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('fs.exists', () => ({ value: true }))
+  on('fs.stat', () => ({ value: { kind: 'file', size: inbox.length, mtimeMs, isLink: false } }))
+  on('fs.read', () => ({ value: inbox }))
+  on('prompt.submit', (_, e) => { prompts.push(e.text); return { text: e.text } })
+  on('ui.status', () => ({ value: undefined }))
+  await $.session.start({ cwd: '/site', surface: 'terminal', isInteractive: true })
+  await $.command.run(typed())
+  await clock.settle()
+  expect(prompts.length).toBe(1)
+  expect(prompts[0]).not.toMatch(/- note 1 /)
+  expect(prompts[0]).toMatch(/- note 2 /)
+  inbox += `${state(2, 'cancelled')}\n${note('c', 'In progress', 'no duplicate')}\n${state(3, 'applying')}\n`
+  mtimeMs++
+  await $.command.run(typed('stop'))
+  await $.command.run(typed())
+  await clock.settle()
+  expect(prompts.length).toBe(1)
+})

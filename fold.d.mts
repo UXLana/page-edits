@@ -1,5 +1,5 @@
 // Types for fold.mjs, which the Claude Code plugin's hooks import.
-export type NoteState = "queued" | "applying" | "done" | "not-in-code" | "needs-you";
+export type NoteState = "queued" | "applying" | "done" | "not-in-code" | "needs-you" | "cancelled";
 export type Note = {
   id: number;
   uid?: string;

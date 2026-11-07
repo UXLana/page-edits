@@ -3,7 +3,7 @@
 //   page-edits watch                    one line per note still to handle, then one per new note
 //   page-edits list                     every note and its state
 //   page-edits find <id>                where the note's words are written (JSON)
-//   page-edits state <id> <state>       records progress; `done` takes a result on stdin
+//   page-edits state <id> <state> --identity <uid-or-id:at> records progress; `done` takes a result on stdin
 //
 // Every command takes `--inbox <file>`: the inbox the dev server printed. Without it,
 // PAGE_EDITS_INBOX, else `.page-edits/notes.jsonl` in the current folder. A `done` state takes
@@ -13,9 +13,9 @@
 import { watchFile } from "node:fs";
 import { resolve } from "node:path";
 import { locate } from "./finder.mjs";
-import { appendState, defaultInbox, FINAL_STATES, isNewer, NOTE_FORMAT, readNotes } from "./store.mjs";
+import { appendState, defaultInbox, isNewer, NOTE_FORMAT, readNotes } from "./store.mjs";
 
-const USAGE = "usage: page-edits watch|list [--inbox <file>] · find <id> · state <id> <state>";
+const USAGE = "usage: page-edits watch|list [--inbox <file>] · find <id> · state <id> <state> --identity <uid-or-id:at>";
 
 const oneLine = (text, max) => {
   const flat = String(text ?? "").replace(/\s+/g, " ").trim();
@@ -27,13 +27,18 @@ export const describe = (note) =>
 function parse(argv, env) {
   const words = [];
   let inbox = env.PAGE_EDITS_INBOX;
+  let identity;
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--inbox" || argv[i].startsWith("--inbox=")) {
       inbox = argv[i] === "--inbox" ? argv[++i] : argv[i].slice("--inbox=".length);
       if (!inbox) return { error: "page-edits: --inbox needs a path" };
+    } else if (argv[i] === "--identity" || argv[i].startsWith("--identity=")) {
+      if (identity !== undefined) return { error: "page-edits: --identity must be given only once" };
+      identity = argv[i] === "--identity" ? argv[++i] : argv[i].slice("--identity=".length);
+      if (!identity || identity.startsWith("--")) return { error: "page-edits: --identity needs the handed-off note identity" };
     } else words.push(argv[i]);
   }
-  return { words, file: inbox ? resolve(inbox) : defaultInbox(process.cwd()) };
+  return { words, identity, file: inbox ? resolve(inbox) : defaultInbox(process.cwd()) };
 }
 
 async function readStdin() {
@@ -45,8 +50,12 @@ async function readStdin() {
 
 // Returns the exit code; `watch` never returns.
 export async function main(argv, { env = process.env, out = console.log, err = console.error } = {}) {
+  if (argv[0] === "codex-watch") {
+    const { codexWatchMain } = await import("./codex-receiver.mjs");
+    return codexWatchMain(argv.slice(1), { env, out, err });
+  }
   const fail = (message, code = 1) => (err(message), code);
-  const { words, file, error } = parse(argv, env);
+  const { words, identity, file, error } = parse(argv, env);
   if (error) return fail(`${error}\n${USAGE}`, 2);
   const [command, idArg, stateArg] = words;
   const noteById = (id) => readNotes(file).find((n) => n.id === Number(id));
@@ -61,7 +70,7 @@ export async function main(argv, { env = process.env, out = console.log, err = c
         const key = note.uid ?? `${note.id}:${note.at}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        if (!FINAL_STATES.has(note.state)) out(describe(note));
+        if (note.state === "queued") out(`${describe(note)} · identity ${JSON.stringify(key)}`);
       }
     };
     out(`watching ${file}`);
@@ -77,6 +86,7 @@ export async function main(argv, { env = process.env, out = console.log, err = c
     const note = noteById(idArg);
     if (!note) return fail(`page-edits: no note ${idArg} in ${file}`);
     if (isNewer(note)) return fail(tooNew(note));
+    if (identity && (note.uid ?? `${note.id}:${note.at}`) !== identity) return fail(`page-edits: note ${idArg} changed; refresh the queue`);
     const ledger = readNotes(file)
       .filter((n) => n.id < note.id && n.state === "done" && n.result?.before && n.result?.after)
       .map(({ id, page, result, updatedAt }) => ({ id, page, result, doneAt: updatedAt }));
@@ -84,7 +94,7 @@ export async function main(argv, { env = process.env, out = console.log, err = c
     out(
       JSON.stringify(
         {
-          note: { id: note.id, page: note.page, selected: note.selected, comment: note.comment, root: note.root },
+          note: { id: note.id, uid: note.uid ?? null, at: note.at, page: note.page, selected: note.selected, comment: note.comment, root: note.root },
           status: found.status,
           followedNote: found.followedNote ?? null,
           match: found.match ?? null,
@@ -100,6 +110,7 @@ export async function main(argv, { env = process.env, out = console.log, err = c
     const note = noteById(idArg);
     if (!note) return fail(`page-edits: no note ${idArg} in ${file}`);
     if (isNewer(note)) return fail(tooNew(note));
+    if (!identity) return fail("page-edits: state requires --identity from the handoff or find output", 2);
     const input = await readStdin();
     let result = null;
     try {
@@ -108,7 +119,7 @@ export async function main(argv, { env = process.env, out = console.log, err = c
       return fail(`page-edits: the result on stdin is not JSON: ${input.slice(0, 80)}`);
     }
     try {
-      appendState(file, Number(idArg), stateArg, result);
+      appendState(file, Number(idArg), stateArg, result, new Date(), identity);
     } catch (problem) {
       return fail(problem.message);
     }

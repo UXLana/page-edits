@@ -9,7 +9,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { locate } from "../finder.mjs";
-import { appendNote, appendState, defaultInbox, readNotes } from "../store.mjs";
+import { appendNote, appendState, defaultInbox, NOTE_FORMAT, readNotes } from "../store.mjs";
 import pageEdits, { createHandler, resolveInbox, siteKey } from "../vite-plugin.mjs";
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "../cli.mjs");
@@ -312,7 +312,7 @@ try {
 }
 
 {
-  const done = spawnSync(process.execPath, [CLI, "state", "1", "done", "--inbox", inbox], {
+  const done = spawnSync(process.execPath, [CLI, "state", "1", "done", "--inbox", inbox, "--identity", readNotes(inbox)[0].uid], {
     input: JSON.stringify({ file: "src/x.tsx", before: "first", after: "the first" }),
     encoding: "utf8",
   });
@@ -396,23 +396,24 @@ try {
   const noPath = spawnSync(process.execPath, [CLI, "list", "--inbox"], { cwd: home, encoding: "utf8" });
   assert.equal(noPath.status, 2);
   assert.match(noPath.stderr, /--inbox needs a path/);
-  const notJson = spawnSync(process.execPath, [CLI, "state", "1", "done"], { cwd: home, input: "{oops", encoding: "utf8" });
+  const identity = readNotes(defaultInbox(home))[0].uid;
+  const notJson = spawnSync(process.execPath, [CLI, "state", "1", "done", "--identity", identity], { cwd: home, input: "{oops", encoding: "utf8" });
   assert.equal(notJson.status, 1);
   assert.match(notJson.stderr, /^page-edits: the result on stdin is not JSON/);
-  const unknown = spawnSync(process.execPath, [CLI, "state", "1", "finished"], { cwd: home, encoding: "utf8" });
+  const unknown = spawnSync(process.execPath, [CLI, "state", "1", "finished", "--identity", identity], { cwd: home, encoding: "utf8" });
   assert.equal(unknown.status, 1);
   assert.equal(unknown.stderr.trim(), 'page-edits: unknown state "finished"');
-  spawnSync(process.execPath, [CLI, "state", "1", "done"], { cwd: home, input: '{"file":"a","before":"x","after":"z"}', encoding: "utf8" });
-  const reopen = spawnSync(process.execPath, [CLI, "state", "1", "applying"], { cwd: home, encoding: "utf8" });
+  spawnSync(process.execPath, [CLI, "state", "1", "done", "--identity", identity], { cwd: home, input: '{"file":"a","before":"x","after":"z"}', encoding: "utf8" });
+  const reopen = spawnSync(process.execPath, [CLI, "state", "1", "applying", "--identity", identity], { cwd: home, encoding: "utf8" });
   assert.equal(reopen.status, 1);
   assert.equal(reopen.stderr.trim(), "page-edits: note 1 is already done");
   assert.equal(readNotes(defaultInbox(home))[0].result.after, "z");
-  assert.equal(readNotes(defaultInbox(home))[0].format, 1);
-  writeFileSync(join(home, "newer.jsonl"), `${JSON.stringify({ type: "note", format: 2, uid: "n", at: "2026-11-05T00:00:00.000Z", root: home, page: "/", selected: "a", comment: "b" })}\n`);
+  assert.equal(readNotes(defaultInbox(home))[0].format, NOTE_FORMAT);
+  writeFileSync(join(home, "newer.jsonl"), `${JSON.stringify({ type: "note", format: NOTE_FORMAT + 1, uid: "n", at: "2026-11-05T00:00:00.000Z", root: home, page: "/", selected: "a", comment: "b" })}\n`);
   for (const args of [["find", "1"], ["state", "1", "applying"]]) {
     const newer = spawnSync(process.execPath, [CLI, ...args, "--inbox", join(home, "newer.jsonl")], { cwd: home, encoding: "utf8" });
     assert.equal(newer.status, 1);
-    assert.match(newer.stderr, /written in note format 2; this page-edits reads up to 1\. Update the package\./);
+    assert.ok(newer.stderr.includes(`written in note format ${NOTE_FORMAT + 1}; this page-edits reads up to ${NOTE_FORMAT}. Update the package.`));
   }
   rmSync(home, { recursive: true, force: true });
   pass("the receiver's command reads the site's inbox from its folder or PAGE_EDITS_INBOX, refuses bad input without a stack trace, never reopens a done note, and leaves a newer note format alone");

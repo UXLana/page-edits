@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { basename, dirname, isAbsolute, join, posix, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendNote, defaultInbox, INBOX_FOLDER, readNotes } from "./store.mjs";
+import { appendNote, appendState, defaultInbox, INBOX_FOLDER, readNotes } from "./store.mjs";
 
 const BASE = "/__page-edits";
 const CLIENT = join(dirname(fileURLToPath(import.meta.url)), "client.js");
@@ -94,10 +94,25 @@ export function createHandler({ root, storeFile, site = basename(storeFile, ".js
       return send(res, 200, `const PAGE_EDITS_SITE = ${JSON.stringify(site)};\n${readFileSync(CLIENT, "utf8")}`, "text/javascript");
     }
     if (req.method === "GET" && url === `${BASE}/notes`) {
-      const notes = readNotes(storeFile).map(({ id, at, page, selected, comment, state, result }) => ({
-        id, at, page, selected, comment, state, result,
+      const notes = readNotes(storeFile).map(({ id, uid, at, page, selected, comment, state, result }) => ({
+        id, uid, at, page, selected, comment, state, result,
       }));
       return send(res, 200, { notes });
+    }
+    const clear = url.match(/^\/__page-edits\/notes\/([1-9]\d*)\/clear$/);
+    if (req.method === "POST" && clear) {
+      if (req.headers["x-page-edits"] !== "1") return send(res, 403, { error: "missing header" });
+      let body;
+      try { body = JSON.parse(await readBody(req)); }
+      catch { return send(res, 400, { error: "unreadable request" }); }
+      if (typeof body?.identity !== "string" || !body.identity || body.identity.length > 200) return send(res, 400, { error: "missing note identity" });
+      try {
+        appendState(storeFile, Number(clear[1]), "cancelled", { message: "Cleared without applying" }, new Date(), body.identity);
+        return send(res, 200, { id: Number(clear[1]), state: "cancelled" });
+      } catch (error) {
+        if (String(error.message).startsWith("page-edits:")) return send(res, 409, { error: error.message });
+        return send(res, 500, { error: "Could not save the change; the note has not been confirmed cleared" });
+      }
     }
     if (req.method === "POST" && url === `${BASE}/notes`) {
       if (req.headers["x-page-edits"] !== "1") return send(res, 403, { error: "missing header" });

@@ -1,8 +1,8 @@
 {
   "name": "page-edits",
-  "version": "0.1.0",
-  "description": "Highlight copy on your running Vite site, type what should change and keep going, while a Claude Code session rewrites it in the source.",
-  "keywords": ["vite-plugin", "copywriting", "copy-editing", "content", "claude-code"],
+  "version": "0.2.0",
+  "description": "Highlight copy on your running Vite site, type what should change and keep going, while a Claude Code or Codex session rewrites it in the source.",
+  "keywords": ["vite-plugin", "copywriting", "copy-editing", "content", "claude-code", "codex"],
   "homepage": "https://github.com/UXLana/page-edits#readme",
   "bugs": "https://github.com/UXLana/page-edits/issues",
   "repository": { "type": "git", "url": "git+https://github.com/UXLana/page-edits.git" },
@@ -17,6 +17,7 @@
   "bin": { "page-edits": "cli.mjs" },
   "files": [
     "cli.mjs",
+    "codex-receiver.mjs",
     "client.js",
     "finder.mjs",
     "fold.mjs",
@@ -24,10 +25,11 @@
     "index.d.ts",
     "receiver.mjs",
     "store.mjs",
-    "vite-plugin.mjs"
+    "vite-plugin.mjs",
+    "skills/apply-page-edits/SKILL.md"
   ],
   "scripts": {
-    "test": "node test/fixture-test.mjs",
+    "test": "node test/fixture-test.mjs && node --test test/codex-receiver-test.mjs test/clear-test.mjs",
     "test:browser": "node test/e2e.mjs",
     "test:plugin": "claude plugin test ."
   },

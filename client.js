@@ -20,7 +20,7 @@
   const DRAFT_KEY = `page-edits:${SITE}:draft`;
   const OUTBOX_KEY = `page-edits:${SITE}:outbox`;
   const OPEN_KEY = "page-edits:list-open";
-  const FINAL = new Set(["done", "not-in-code", "needs-you"]);
+  const FINAL = new Set(["done", "not-in-code", "needs-you", "cancelled"]);
   const SEND_TIMEOUT_MS = 10_000;
   const KEEP_FINISHED = 30; // finished notes kept in the list; unfinished ones are always shown
   const LABELS = {
@@ -31,6 +31,7 @@
     done: "Done",
     "not-in-code": "Not in code",
     "needs-you": "Needs you",
+    cancelled: "Cleared",
   };
   const BLOCKS = new Set(["P", "LI", "H1", "H2", "H3", "H4", "H5", "H6", "BLOCKQUOTE", "TD", "TH", "DD", "DT", "FIGCAPTION", "SECTION", "ARTICLE", "MAIN", "BODY"]);
 
@@ -92,13 +93,21 @@
       ol { list-style: none; margin: 0; padding: 0 10px 10px; max-height: min(50vh, 420px); overflow: auto; }
       li { padding: 8px 0; border-top: 1px solid var(--line); }
       .head { display: flex; gap: 8px; align-items: baseline; }
+      li.can-clear { position: relative; padding-right: 34px; min-height: 44px; }
+      .clear-note { position: absolute; top: 3px; right: 0; width: 28px; height: 28px;
+        min-height: 28px; display: grid; place-items: center; padding: 0; border-color: transparent;
+        background: transparent; color: var(--control); font-size: 16px; line-height: 1; opacity: 0; }
+      li.can-clear:hover .clear-note, li.can-clear:focus-within .clear-note { opacity: 1; }
+      @media (hover: none) { .clear-note { opacity: 1; } }
+      .clear-note:hover:not(:disabled) { background: var(--line); color: var(--fg); }
+      .clear-note:disabled { cursor: wait; opacity: .65; }
       .num { font-weight: 700; }
       .state { font-size: 12px; font-weight: 600; }
       .state.queued, .state.sending { color: var(--queued); }
       .state.applying, .state.not-sent { color: var(--applying); }
       .state.done { color: var(--done); }
       .state.not-in-code, .state.needs-you { color: var(--stop); }
-      .page { margin-left: auto; color: var(--muted); font-size: 12px; }
+      .page { margin-left: auto; min-width: 0; overflow-wrap: anywhere; color: var(--muted); font-size: 12px; }
       .text, .result { margin: 2px 0 0; overflow-wrap: anywhere; }
       .text q { color: var(--muted); }
       .result { color: var(--muted); font-size: 12px; }
@@ -135,6 +144,8 @@
   let outbox = Array.isArray(savedOutbox) ? savedOutbox : []; // written, not yet taken; oldest first
   let outboxSaved = true; // whether the outbox last reached storage
   const announced = new Map();
+  const clearing = new Set();
+  const clearErrors = new Map();
   let shown = 0; // notes in the list at the last render, to bring a new one into view
 
   const clip = (text, max) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
@@ -302,12 +313,51 @@
     items.hidden = !open;
   }
 
+  async function clearNote(note) {
+    const identity = note.uid ?? `${note.id}:${note.at}`;
+    if (clearing.has(identity)) return;
+    const hadFocus = root.activeElement?.dataset.queueKey === identity;
+    let succeeded = false;
+    clearing.add(identity);
+    clearErrors.delete(identity);
+    render();
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), SEND_TIMEOUT_MS);
+    try {
+      const response = await fetch(`${BASE}/notes/${note.id}/clear`, {
+        method: "POST", headers: { "Content-Type": "application/json", "X-Page-Edits": "1" },
+        body: JSON.stringify({ identity }), signal: abort.signal,
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || "Could not clear this note.");
+      serverNotes = serverNotes.map((n) => (n.uid ?? `${n.id}:${n.at}`) === identity ? { ...n, state: "cancelled" } : n);
+      announce(`Note ${note.id} cleared. It will not be applied.`);
+      succeeded = true;
+      if (hadFocus && root.activeElement === toggle) toggle.focus({ preventScroll: true });
+    } catch (error) {
+      const message = error.name === "AbortError" ? "Clear was not confirmed. Refresh the queue before trying again." : error.message;
+      clearErrors.set(identity, message);
+      announce(message);
+    } finally {
+      clearTimeout(timer);
+      clearing.delete(identity);
+      render();
+      if (!succeeded && hadFocus && root.activeElement === toggle) {
+        const retry = [...items.querySelectorAll("button[data-queue-key]")].find(button => button.dataset.queueKey === identity);
+        retry?.focus({ preventScroll: true });
+      }
+      void poll(false);
+    }
+  }
+
   function render() {
-    const all = [...serverNotes, ...outbox.map((n, i) => ({ ...n, id: n.refused ? "!" : `…${i + 1}` }))];
+    const focusedKey = root.activeElement?.dataset.queueKey;
+    const all = [...serverNotes.filter((n) => n.state !== "cancelled"), ...outbox.map((n, i) => ({ ...n, id: n.refused ? "!" : `…${i + 1}` }))];
     const open = all.filter((n) => !FINAL.has(n.state)).length;
     const finished = all.filter((n) => FINAL.has(n.state)).slice(-KEEP_FINISHED);
     const notes = all.filter((n) => !FINAL.has(n.state) || finished.includes(n));
-    list.hidden = all.length === 0;
+    // Keep the queue toggle available after clearing the last item, so keyboard focus has a home.
+    list.hidden = all.length === 0 && serverNotes.length === 0;
     warn.hidden = outboxSaved || !outbox.some((n) => !n.refused);
     toggle.textContent = `Notes · ${open ? `${open} in progress` : "all handled"} · ${all.length} total`;
     items.replaceChildren(
@@ -334,6 +384,27 @@
         q.textContent = clip(note.selected, 90);
         text.append(q, ` — ${clip(note.comment, 140)}`);
         li.append(head, text);
+        const identity = note.uid ?? `${note.id}:${note.at}`;
+        if (note.state === "queued") {
+          const clear = document.createElement("button");
+          li.className = "can-clear";
+          clear.type = "button";
+          clear.className = "clear-note";
+          clear.textContent = clearing.has(identity) ? "…" : "×";
+          clear.title = clearing.has(identity) ? "Clearing note…" : "Clear note";
+          clear.setAttribute("aria-busy", String(clearing.has(identity)));
+          clear.disabled = clearing.has(identity);
+          clear.dataset.queueKey = identity;
+          clear.setAttribute("aria-label", `Clear queued note ${note.id}: ${clip(note.selected, 40)}`);
+          clear.addEventListener("click", () => void clearNote(note));
+          li.append(clear);
+        }
+        if (clearErrors.has(identity)) {
+          const problem = document.createElement("p");
+          problem.className = "result";
+          problem.textContent = clearErrors.get(identity);
+          li.append(problem);
+        }
         const result = note.result ?? {};
         const lines = [
           result.after ? `${clip(squashSpace(result.before ?? ""), 70)} → ${clip(squashSpace(result.after), 90)}` : "",
@@ -351,6 +422,7 @@
           why.textContent = "The dev server refused this note.";
           const dismiss = document.createElement("button");
           dismiss.type = "button";
+          dismiss.dataset.queueKey = `dismiss:${note.clientId}`;
           dismiss.textContent = "Dismiss";
           dismiss.setAttribute("aria-label", `Dismiss refused note: ${clip(note.selected, 40)}`);
           dismiss.addEventListener("click", () => changeOutbox((current) => current.filter((n) => n.clientId !== note.clientId)));
@@ -359,6 +431,10 @@
         return li;
       }),
     );
+    if (focusedKey) {
+      const replacement = [...items.querySelectorAll("button[data-queue-key]")].find(button => button.dataset.queueKey === focusedKey && !button.disabled);
+      (replacement ?? toggle).focus({ preventScroll: true });
+    }
     if (notes.length > shown) items.scrollTop = items.scrollHeight;
     shown = notes.length;
   }

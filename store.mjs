@@ -10,7 +10,7 @@
 import { randomUUID } from "node:crypto";
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
-import { foldNotes, NOTE_FORMAT, parseEvents, STATES } from "./fold.mjs";
+import { foldNotes, NOTE_FORMAT, parseEvents, STATES, FINAL_STATES } from "./fold.mjs";
 
 export { FINAL_STATES, isNewer, NOTE_FORMAT, STATES } from "./fold.mjs";
 
@@ -67,10 +67,20 @@ export function appendNote(file, fields, now = new Date()) {
 // `result` for done: { file, before, after } — the exact source text replaced and its replacement.
 // It is both what the page shows and the ledger a later note follows when its words were rewritten.
 // A done note is final: its result is what later notes follow, so it is never reopened.
-export function appendState(file, id, state, result = null, now = new Date()) {
+export function appendState(file, id, state, result = null, now = new Date(), expectedIdentity = null) {
   if (!STATES.includes(state)) throw new Error(`page-edits: unknown state "${state}"`);
   const note = readNotes(file).find((n) => n.id === id);
   if (!note) throw new Error(`page-edits: no note ${id}`);
+  if (expectedIdentity && (note.uid ?? `${note.id}:${note.at}`) !== expectedIdentity) throw new Error(`page-edits: note ${id} changed; refresh the queue`);
   if (note.state === "done") throw new Error(`page-edits: note ${id} is already done`);
-  append(file, { type: "state", id, state, result, at: now.toISOString() });
+  if (note.state === "cancelled") throw new Error(`page-edits: note ${id} was cleared; do not apply it`);
+  if (FINAL_STATES.has(note.state)) throw new Error(`page-edits: note ${id} is already ${note.state}`);
+  if (state === "queued" || (state === "applying" && note.state !== "queued")) throw new Error(`page-edits: note ${id} is already ${note.state}; it cannot be claimed again`);
+  if (state === "cancelled" && note.state !== "queued") throw new Error(`page-edits: note ${id} has already started or finished; it cannot be cleared`);
+  const eventId = randomUUID();
+  append(file, { type: "state", id, noteUid: note.uid ?? null, noteAt: note.at, eventId, state, result, at: now.toISOString() });
+  const accepted = readNotes(file).find((n) => n.id === id);
+  if (accepted?.stateEventId !== eventId) {
+    throw new Error(`page-edits: note ${id} is now ${accepted?.state ?? "unavailable"}; this action was not accepted`);
+  }
 }

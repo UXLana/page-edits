@@ -4,7 +4,7 @@
     "name": "Lana Holston"
   },
   "metadata": {
-    "description": "page-edits: edit a site's copy by highlighting it on the running page; a Claude Code session applies each note."
+    "description": "page-edits: edit a site's copy by highlighting it on the running page; a Claude Code or Codex session applies each note."
   },
   "plugins": [
     {

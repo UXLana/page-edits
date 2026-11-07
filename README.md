@@ -1,11 +1,11 @@
 # page-edits
 
-Highlight copy on your running Vite site, type what should change, and keep going. A Claude Code
+Highlight copy on your running Vite site, type what should change, and keep going. A Claude Code or Codex
 session finds those words in your source, rewrites them the way you asked, and the page updates
 itself, one note after another, in the order you wrote them.
 
 It is for anyone who edits a site's words by looking at the site: designers, writers and product
-people working with Claude Code. No screenshots, no pasting text back and forth.
+people working with coding agents. No screenshots, no pasting text back and forth.
 
 ## How it works
 
@@ -20,6 +20,7 @@ people working with Claude Code. No screenshots, no pasting text back and forth.
 4. In Claude Code, `/page-edits` watches that inbox and hands each new note to the session. The
    session finds the words in your source, rewrites the passage following your direction (a
    direction, not text to paste), saves it, and records what changed.
+   Codex uses the explicit CLI watch described below.
 
 ## Install
 
@@ -72,8 +73,44 @@ In the Claude desktop app, where `/plugin` does not run: click **+** next to the
    - A site in a sub-folder: `/page-edits apps/web`.
    - Notes kept somewhere else: `/page-edits path/to/notes.jsonl`.
    - `/page-edits stop` stops watching. Notes sent meanwhile wait in the inbox; `/page-edits` again
-     picks up every note still open.
+     picks up every note still Queued.
 3. Highlight, comment, keep going. The status line shows how many notes are waiting.
+
+Changed your mind? Hover over a **Queued** item to reveal the subtle **×** at its top-right.
+The control also appears on keyboard focus and stays visible on touch screens. Clearing removes
+the note from the list and prevents either receiver
+from applying it, even if its handoff is already waiting in the session. Clearing is saved in the
+inbox, so it survives a reload or receiver restart. Once a note is **Applying**, it cannot be cleared
+or silently undone. If it starts as you click, the page tells you it could not be cleared.
+Update the page package and receiver/plugin together to **0.2.0**: new notes use format 2 for this behavior.
+
+## Codex: an explicit CLI watch
+
+The manual Codex receiver uses an existing session in the site's folder. It requires a Codex CLI
+with `queue --resume` (tested with `0.167.0-alpha.3.2`) and a running local Codex daemon, or an explicit
+local app-server endpoint. Choose the intended session's UUID; session names are not accepted.
+The session must already have permission to edit this site. This command does not create a session,
+start a daemon, install a plugin or change permissions.
+
+From the same site folder, in a separate terminal:
+
+```bash
+npx --no page-edits codex-watch --thread <session-uuid>
+# If the dev server printed a different inbox:
+npx --no page-edits codex-watch --thread <session-uuid> --inbox /path/to/notes.jsonl
+# An explicitly selected local app-server, instead of the default daemon:
+npx --no page-edits codex-watch --thread <session-uuid> --remote unix:///path/to/server.sock
+```
+
+Highlight and comment as usual. The watch queues notes for the selected session, which reads the
+bundled skill and records its work in the inbox. **Ctrl-C stops this watch.** Start it again to replay
+notes still Queued; applying or finished notes are not replayed. Keep only one receiver watching a site.
+
+"Queued" means the CLI accepted the handoff, not that the edit succeeded. The page reaches Done only
+when the session records its result. A queue error or resume warning stops the watcher and leaves
+notes open: inspect the selected session and daemon before restarting, since a warning can occur
+after the message was queued. A permission denial or unresolved note needs attention in that session.
+The Claude `/page-edits` plugin command and its stop command remain separate.
 
 ## What the box promises
 
@@ -142,10 +179,15 @@ The package's own command is what the skill uses, and you can run it too, from t
 
 ```bash
 npx page-edits list                              # every note and its state
-npx page-edits watch                             # one line per open note, then per new note
+npx page-edits watch                             # one line per queued note, then per new note
 npx page-edits find <id>                         # where the note's words are written (JSON)
-echo '{"message":"…"}' | npx page-edits state <id> needs-you
+echo '{"message":"…"}' | npx page-edits state <id> needs-you --identity <uid-or-id:at>
 ```
+
+Every `state` write requires `--identity <uid-or-id:at>` from the handoff or `find` output.
+Only Queued notes can be claimed. Already-Applying notes are never automatically reclaimed;
+after an interrupted turn, inspect the source and reconcile its result before recording the
+final state. Finished notes cannot reopen; submit a new note for a new request.
 
 Each takes `--inbox <path>` when the notes are not in the default place.
 

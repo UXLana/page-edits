@@ -1,0 +1,16 @@
+{
+  "name": "page-edits",
+  "owner": {
+    "name": "Lana Holston"
+  },
+  "metadata": {
+    "description": "page-edits: edit a site's copy by highlighting it on the running page; a Claude Code session applies each note."
+  },
+  "plugins": [
+    {
+      "name": "page-edits",
+      "source": "./",
+      "description": "Highlight copy on your running Vite site, type what should change, keep going: this session rewrites it in the source."
+    }
+  ]
+}
